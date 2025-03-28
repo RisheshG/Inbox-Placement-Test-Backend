@@ -790,35 +790,60 @@ const extractAuthResult = (header, type) => {
 
 app.get("/get-previous-tests", authenticateUser, async (req, res) => {
   try {
+    // Fetch all test recipients for the logged-in user
     const { rows: testRecipients } = await db.query(
-      "SELECT * FROM TestRecipients WHERE userId = $1 ORDER BY timestamp DESC",
+      "SELECT * FROM TestRecipients WHERE userId = $1 ORDER BY timestamp DESC", 
       [req.user.id]
     );
 
+    // Fetch results and analysis for each test recipient
     const previousTests = await Promise.all(
       testRecipients.map(async (recipient) => {
+        // Fetch ALL test results for the current test code
         const { rows: results } = await db.query(
-          "SELECT * FROM TestResults WHERE testCode = $1",
+          "SELECT * FROM TestResults WHERE testCode = $1", 
           [recipient.testcode]
         );
 
+        // Process results while maintaining order
         const orderedResults = [];
-        const allEmailsInOrder = [
-          ...['Patricia@emaildeliveryreport.com', 'l.Patricia@emaildeliveryreport.net', 
-              'lindaPatricia@xemaildeliveryreport.com', 'Linda@xemaildeliveryreport.com', 
-              'linda.patricia@xemaildeliveryreport.com'],
-          ...['brijesh@xleadoutreach.com', 'mahendra@xleadsconsulting.com', 
-              'lakhendra@xleadsconsulting.com', 'xgrowthtech@xleadsconsulting.com', 
-              'audit@xleadoutreach.com'],
-          ...['tmm003937@gmail.com', 'mta872679@gmail.com', 'houseisitter@gmail.com', 
-              'malaikaarora983475@gmail.com', 'rheadutta096@gmail.com']
+        
+        // First add pro-gmail accounts in order
+        const proGmailEmails = [
+          'Patricia@emaildeliveryreport.com',
+          'l.Patricia@emaildeliveryreport.net',
+          'lindaPatricia@xemaildeliveryreport.com',
+          'Linda@xemaildeliveryreport.com',
+          'linda.patricia@xemaildeliveryreport.com'
+        ];
+        
+        // Then add pro-outlook accounts in order
+        const proOutlookEmails = [
+          'brijesh@xleadoutreach.com',
+          'mahendra@xleadsconsulting.com',
+          'lakhendra@xleadsconsulting.com',
+          'xgrowthtech@xleadsconsulting.com',
+          'audit@xleadoutreach.com'
+        ];
+        
+        // Then add regular gmail accounts in order
+        const gmailEmails = [
+          'tmm003937@gmail.com',
+          'mta872679@gmail.com',
+          'houseisitter@gmail.com',
+          'malaikaarora983475@gmail.com',
+          'rheadutta096@gmail.com'
         ];
 
+        // Combine all emails in the desired order
+        const allEmailsInOrder = [...proGmailEmails, ...proOutlookEmails, ...gmailEmails];
+
+        // Process results in the predefined order
         for (const email of allEmailsInOrder) {
           const result = results.find(r => r.email === email);
           if (result) {
             const { rows: analysis } = await db.query(
-              "SELECT * FROM EmailAnalysis WHERE testResultId = $1",
+              "SELECT * FROM EmailAnalysis WHERE testResultId = $1", 
               [result.id]
             );
 
@@ -839,22 +864,22 @@ app.get("/get-previous-tests", authenticateUser, async (req, res) => {
               esp: espMapping[result.email] || 'unknown',
               status: result.status,
               subject: analysis[0]?.subject || "No Subject",
-              from: analysis[0]?.fromemail || "Unknown Sender",
+              from: analysis[0]?.fromemail || "Unknown Sender", // Changed to lowercase to match PostgreSQL
               date: analysis[0]?.date || "Unknown Date",
-              linkCount: analysis[0]?.linkstatuses ? safeParse(analysis[0].linkstatuses).length : 0,
-              linkStatuses: analysis[0]?.linkstatuses ? safeParse(analysis[0].linkstatuses) : [],
-              domainBlacklistCheck: analysis[0]?.domainblacklistcheck ? safeParse(analysis[0].domainblacklistcheck) : [],
-              ipBlacklistCheck: analysis[0]?.ipblacklistcheck ? safeParse(analysis[0].ipblacklistcheck) : [],
-              spamWordAnalysis: analysis[0]?.spamwordanalysis ? safeParse(analysis[0].spamwordanalysis) : {},
-              mxRecords: analysis[0]?.mxrecords || null,
-              mxRecordsData: analysis[0]?.mxrecordsdata ? safeParse(analysis[0].mxrecordsdata) : null,
+              linkCount: analysis[0]?.linkstatuses ? safeParse(analysis[0].linkstatuses).length : 0, // Changed to lowercase
+              linkStatuses: analysis[0]?.linkstatuses ? safeParse(analysis[0].linkstatuses) : [], // Changed to lowercase
+              domainBlacklistCheck: analysis[0]?.domainblacklistcheck ? safeParse(analysis[0].domainblacklistcheck) : [], // Changed to lowercase
+              ipBlacklistCheck: analysis[0]?.ipblacklistcheck ? safeParse(analysis[0].ipblacklistcheck) : [], // Changed to lowercase
+              spamWordAnalysis: analysis[0]?.spamwordanalysis ? safeParse(analysis[0].spamwordanalysis) : {}, // Changed to lowercase
+              mxRecords: analysis[0]?.mxrecords || null, // Changed to lowercase
+              mxRecordsData: analysis[0]?.mxrecordsdata ? safeParse(analysis[0].mxrecordsdata) : null, // Changed to lowercase
               analysis: analysis[0] || null,
             });
           }
         }
 
         return {
-          testCode: recipient.testcode,
+          testCode: recipient.testcode, // Changed to lowercase to match PostgreSQL
           sendingEmail: req.user.email,
           results: orderedResults,
         };
@@ -873,6 +898,7 @@ app.get("/get-latest-analysis/:testCode", authenticateUser, async (req, res) => 
   console.log("Fetching analysis for testCode:", testCode);
 
   try {
+    // Fetch the latest analysis directly for the given test code
     const { rows: analysis } = await db.query(
       `SELECT ea.* 
        FROM EmailAnalysis ea
@@ -890,6 +916,7 @@ app.get("/get-latest-analysis/:testCode", authenticateUser, async (req, res) => 
 
     console.log("Analysis data found:", analysis[0]);
 
+    // Helper function to safely parse JSON or return the original value
     const safeParse = (value) => {
       if (typeof value === 'string') {
         try {
@@ -902,81 +929,22 @@ app.get("/get-latest-analysis/:testCode", authenticateUser, async (req, res) => 
       return value;
     };
 
+    // Parse JSON fields if they are stored as strings
     const parsedAnalysis = {
       ...analysis[0],
       authentication: safeParse(analysis[0].authentication),
-      domainblacklistcheck: safeParse(analysis[0].domainblacklistcheck),
-      ipblacklistcheck: safeParse(analysis[0].ipblacklistcheck),
-      linkstatuses: safeParse(analysis[0].linkstatuses),
-      spamwordanalysis: safeParse(analysis[0].spamwordanalysis),
-      mxrecordsdata: safeParse(analysis[0].mxrecordsdata),
+      domainblacklistcheck: safeParse(analysis[0].domainblacklistcheck), // Changed to lowercase
+      ipblacklistcheck: safeParse(analysis[0].ipblacklistcheck), // Changed to lowercase
+      linkstatuses: safeParse(analysis[0].linkstatuses), // Changed to lowercase
+      spamwordanalysis: safeParse(analysis[0].spamwordanalysis), // Changed to lowercase
+      mxrecordsdata: safeParse(analysis[0].mxrecordsdata), // Changed to lowercase
     };
 
+    // Return the latest analysis
     res.json(parsedAnalysis);
   } catch (error) {
     console.error("❌ Error fetching latest analysis:", error.message);
     res.status(500).json({ error: "Internal server error", details: error.message });
-  }
-});
-
-app.get("/results-stream/:testCode", (req, res) => {
-  const { testCode } = req.params;
-  const token = req.query.token;
-
-  if (!token) {
-    return res.status(401).json({ error: "Access denied. No token provided." });
-  }
-
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    const userId = decoded.id;
-
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    res.flushHeaders();
-
-    const sentResults = new Set();
-
-    const sendUpdate = (email, status) => {
-      const resultKey = `${email}:${status}`;
-      if (!sentResults.has(resultKey)) {
-        res.write(`data: ${JSON.stringify({ email, status })}\n\n`);
-        sentResults.add(resultKey);
-        console.log(`📤 Sent update for ${email}: ${status}`);
-      }
-    };
-
-    const checkForUpdates = () => {
-      db.query(
-        "SELECT email, status FROM TestResults WHERE testCode = $1 AND userId = $2",
-        [testCode, userId],
-        (err, { rows: results }) => {
-          if (err) {
-            console.error("❌ Database error:", err.message);
-            return;
-          }
-
-          console.log(`🔍 Found ${results.length} results in database check`);
-          results.forEach((result) => {
-            sendUpdate(result.email, result.status);
-          });
-        }
-      );
-    };
-
-    checkForUpdates();
-    const interval = setInterval(checkForUpdates, 2000);
-
-    req.on("close", () => {
-      clearInterval(interval);
-      res.end();
-      console.log('🚪 Client disconnected from SSE stream');
-    });
-
-  } catch (err) {
-    console.error("SSE setup error:", err);
-    res.status(400).json({ error: "Invalid token." });
   }
 });
 
@@ -1008,21 +976,21 @@ app.get("/results-stream/:testCode", (req, res) => {
       if (!sentResults.has(resultKey)) {
         res.write(`data: ${JSON.stringify({ email, status })}\n\n`);
         sentResults.add(resultKey);
-        console.log(`📤 Sent update for ${email}: ${status}`); // Debug log
+        console.log(`📤 Sent update for ${email}: ${status}`);
       }
     };
 
     const checkForUpdates = () => {
       db.query(
-        "SELECT email, status FROM TestResults WHERE testCode = ? AND userId = ?",
+        "SELECT email, status FROM TestResults WHERE testCode = $1 AND userId = $2",
         [testCode, userId],
-        (err, results) => {
+        (err, { rows: results }) => {
           if (err) {
             console.error("❌ Database error:", err.message);
             return;
           }
 
-          console.log(`🔍 Found ${results.length} results in database check`); // Debug log
+          console.log(`🔍 Found ${results.length} results in database check`);
           results.forEach((result) => {
             sendUpdate(result.email, result.status);
           });
