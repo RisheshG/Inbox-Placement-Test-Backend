@@ -949,6 +949,7 @@ app.get("/get-latest-analysis/:testCode", authenticateUser, async (req, res) => 
 });
 
 // SSE endpoint for live results
+// In your backend code (app.js or similar)
 app.get("/results-stream/:testCode", (req, res) => {
   const { testCode } = req.params;
   const token = req.query.token;
@@ -962,53 +963,51 @@ app.get("/results-stream/:testCode", (req, res) => {
     const decoded = jwt.verify(token, JWT_SECRET);
     const userId = decoded.id;
 
-    // Set headers for SSE
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
+    // Set proper SSE headers
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // Important for proxies like Nginx
     res.flushHeaders();
 
-    // Keep track of sent results to avoid duplicates
+    // Send a ping every 30 seconds to keep connection alive
+    const pingInterval = setInterval(() => {
+      res.write(': ping\n\n');
+    }, 30000);
+
     const sentResults = new Set();
 
-    const sendUpdate = (email, status) => {
-      const resultKey = `${email}:${status}`;
-      if (!sentResults.has(resultKey)) {
-        res.write(`data: ${JSON.stringify({ email, status })}\n\n`);
-        sentResults.add(resultKey);
-        console.log(`📤 Sent update for ${email}: ${status}`);
-      }
-    };
+    const checkForUpdates = async () => {
+      try {
+        const { rows } = await db.query(
+          "SELECT email, status FROM TestResults WHERE testCode = $1 AND userId = $2",
+          [testCode, userId]
+        );
 
-    const checkForUpdates = () => {
-      db.query(
-        "SELECT email, status FROM TestResults WHERE testCode = $1 AND userId = $2",
-        [testCode, userId],
-        (err, { rows: results }) => {
-          if (err) {
-            console.error("❌ Database error:", err.message);
-            return;
+        rows.forEach(row => {
+          const resultKey = `${row.email}:${row.status}`;
+          if (!sentResults.has(resultKey)) {
+            const data = JSON.stringify({ email: row.email, status: row.status });
+            res.write(`data: ${data}\n\n`);
+            sentResults.add(resultKey);
           }
-
-          console.log(`🔍 Found ${results.length} results in database check`);
-          results.forEach((result) => {
-            sendUpdate(result.email, result.status);
-          });
-        }
-      );
+        });
+      } catch (err) {
+        console.error("Database error:", err);
+      }
     };
 
     // Initial check
     checkForUpdates();
-
-    // Check for updates every 2 seconds
-    const interval = setInterval(checkForUpdates, 2000);
+    
+    // Check every 2 seconds
+    const updateInterval = setInterval(checkForUpdates, 2000);
 
     // Cleanup on client disconnect
-    req.on("close", () => {
-      clearInterval(interval);
+    req.on('close', () => {
+      clearInterval(pingInterval);
+      clearInterval(updateInterval);
       res.end();
-      console.log('🚪 Client disconnected from SSE stream');
     });
 
   } catch (err) {
