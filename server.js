@@ -12,6 +12,29 @@ const jwt = require("jsonwebtoken");
 const fs = require("fs");
 const csv = require("csv-parser");
 
+const espMapping = {
+  // Pro Gmail accounts
+  'Patricia@emaildeliveryreport.com': 'pro-gmail',
+  'l.Patricia@emaildeliveryreport.net': 'pro-gmail',
+  'lindaPatricia@xemaildeliveryreport.com': 'pro-gmail',
+  'Linda@xemaildeliveryreport.com': 'pro-gmail',
+  'linda.patricia@xemaildeliveryreport.com': 'pro-gmail',
+  
+  // Pro Outlook accounts
+  'brijesh@xleadoutreach.com': 'pro-outlook',
+  'mahendra@xleadsconsulting.com': 'pro-outlook',
+  'lakhendra@xleadsconsulting.com': 'pro-outlook',
+  'xgrowthtech@xleadsconsulting.com': 'pro-outlook',
+  'audit@xleadoutreach.com': 'pro-outlook',
+  
+  // Regular Gmail accounts
+  'tmm003937@gmail.com': 'gmail',
+  'mta872679@gmail.com': 'gmail',
+  'houseisitter@gmail.com': 'gmail',
+  'malaikaarora983475@gmail.com': 'gmail',
+  'rheadutta096@gmail.com': 'gmail'
+};
+
 
 const app = express();
 app.use(express.json({ limit: "10mb" })); // Fix JSON parsing issue
@@ -297,13 +320,13 @@ app.post("/check-mails", authenticateUser, async (req, res) => {
       // Check if the email is a Gmail account
       const gmailAccount = gmailAccounts.find((account) => account.email === trimmedEmail);
       if (gmailAccount) {
-        checkMailbox(gmailAccount, testCode, fiveMinutesAgo, req.user.id); // Use IMAP logic for Gmail
+        checkMailbox(gmailAccount, testCode, fiveMinutesAgo, req.user.id);
       }
 
       // Check if the email is an Outlook account
       const outlookAccount = outlookAccounts.find((account) => account.email === trimmedEmail);
       if (outlookAccount) {
-        checkOutlookMailbox(outlookAccount, testCode, req.user.id); // Use Outlook-specific logic
+        checkOutlookMailbox(outlookAccount, testCode, req.user.id);
       }
     });
 
@@ -401,82 +424,142 @@ const checkOutlookMailbox = async (account, testCode, userId) => {
     console.log(`📡 Fetching emails for Outlook account: ${account.email}`);
 
     // Wait for 5 seconds before proceeding
-    console.log("⏳ Waiting for 5 seconds before fetching emails...");
-    await new Promise((resolve) => setTimeout(resolve, 10000));
+    console.log("⏳ Waiting for 15 seconds before fetching emails...");
+    await new Promise((resolve) => setTimeout(resolve, 15000));
 
-    // Get access token
-    const tokenResponse = await axios.post(
-      `https://login.microsoftonline.com/${account.tenant_id}/oauth2/v2.0/token`,
-      qs.stringify({
-        client_id: account.client_id,
-        client_secret: account.client_secret,
-        scope: "https://graph.microsoft.com/.default",
-        grant_type: "client_credentials",
-      }),
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-    );
+    if (account.password) {
+      // Use IMAP for app password-based accounts
+      const config = {
+        imap: {
+          user: account.email,
+          password: account.password,
+          host: "outlook.office365.com",
+          port: 993,
+          tls: true,
+          tlsOptions: { rejectUnauthorized: false },
+          authTimeout: 5000,
+        },
+      };
 
-    if (!tokenResponse.data.access_token) {
-      throw new Error("Failed to obtain Outlook access token");
-    }
+      const connection = await imaps.connect(config);
+      console.log(`✅ Connected to ${account.email}`);
 
-    const accessToken = tokenResponse.data.access_token;
-    console.log("✅ Access token obtained");
+      const searchEmails = async (folderName) => {
+        await connection.openBox(folderName);
+        const searchCriteria = [["SINCE", moment().subtract(5, "minutes").format("DD-MMM-YYYY")]];
+        const fetchOptions = { bodies: ["HEADER", "TEXT"], markSeen: false };
+        const messages = await connection.search(searchCriteria, fetchOptions);
 
-    // Function to search emails in a specific folder
-    const searchFolder = async (folderName) => {
-      console.log(`🔍 Searching folder: ${folderName}`);
+        for (const msg of messages) {
+          const body = msg.parts.find((part) => part.which === "TEXT")?.body || "";
+          if (body.toLowerCase().includes(testCode.toLowerCase())) {
+            const headers = msg.parts.find((part) => part.which === "HEADER")?.body || {};
+            const emailContent = body;
+            const emailHeaders = JSON.stringify(headers);
 
-      // Add a 5-second delay before searching this folder
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+            // Store the email content and headers in the database
+            await db.promise().query(
+              "INSERT INTO TestResults (userId, testCode, email, status, emailContent, emailHeaders) VALUES (?, ?, ?, ?, ?, ?)",
+              [userId, testCode, account.email, folderName === "INBOX" ? "Inbox" : "Spam", emailContent, emailHeaders]
+            );
 
-      const messagesResponse = await axios.get(
-        `https://graph.microsoft.com/v1.0/users/${account.email}/mailFolders/${folderName}/messages?$top=10`,
-        { headers: { Authorization: `Bearer ${accessToken}` } }
-      );
+            console.log(`📨 Found test email in ${folderName} for ${account.email}`);
+            await connection.end();
+            return true;
+          }
+        }
+        return false;
+      };
 
-      if (!messagesResponse.data.value) {
-        throw new Error(`Invalid Outlook API response for folder: ${folderName}`);
+      const foundInInbox = await searchEmails("INBOX");
+      if (foundInInbox) {
+        return;
       }
 
-      console.log(`📩 Found ${messagesResponse.data.value.length} emails in ${folderName}`);
-      return messagesResponse.data.value.some((msg) => {
-        const bodyContent = msg.body?.content || "";
-        const $ = cheerio.load(bodyContent);
-        const plainText = $("body").text().toLowerCase();
-        return plainText.includes(testCode.toLowerCase());
-      });
-    };
+      const foundInSpam = await searchEmails("Junk");
+      if (!foundInSpam) {
+        await db.promise().query(
+          "INSERT INTO TestResults (userId, testCode, email, status) VALUES (?, ?, ?, ?)",
+          [userId, testCode, account.email, "Not Found"]
+        );
+      }
 
-    // Check Inbox folder (with 5-second delay)
-    const foundInInbox = await searchFolder("inbox");
+      console.log(`📨 Email for ${account.email} found in ${foundInSpam ? "SPAM" : "NOT FOUND"}`);
+      await connection.end();
+    } else {
+      // Use Microsoft Graph API for OAuth-based accounts
+      const tokenResponse = await axios.post(
+        `https://login.microsoftonline.com/${account.tenant_id}/oauth2/v2.0/token`,
+        qs.stringify({
+          client_id: account.client_id,
+          client_secret: account.client_secret,
+          scope: "https://graph.microsoft.com/.default",
+          grant_type: "client_credentials",
+        }),
+        { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+      );
 
-    if (foundInInbox) {
-      console.log(`📩 Test email FOUND in Outlook Inbox`);
+      if (!tokenResponse.data.access_token) {
+        throw new Error("Failed to obtain Outlook access token");
+      }
+
+      const accessToken = tokenResponse.data.access_token;
+      console.log("✅ Access token obtained");
+
+      const searchFolder = async (folderName) => {
+        console.log(`🔍 Searching folder: ${folderName}`);
+
+        // Add a 5-second delay before searching this folder
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+
+        const messagesResponse = await axios.get(
+          `https://graph.microsoft.com/v1.0/users/${account.email}/mailFolders/${folderName}/messages?$top=10`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+
+        if (!messagesResponse.data.value) {
+          throw new Error(`Invalid Outlook API response for folder: ${folderName}`);
+        }
+
+        console.log(`📩 Found ${messagesResponse.data.value.length} emails in ${folderName}`);
+        return messagesResponse.data.value.some((msg) => {
+          const bodyContent = msg.body?.content || "";
+          const $ = cheerio.load(bodyContent);
+          const plainText = $("body").text().toLowerCase();
+          return plainText.includes(testCode.toLowerCase());
+        });
+      };
+
+      // Check Inbox folder (with 5-second delay)
+      const foundInInbox = await searchFolder("inbox");
+
+      if (foundInInbox) {
+        console.log(`📩 Test email FOUND in Outlook Inbox`);
+        db.query(
+          "INSERT INTO TestResults (userId, testCode, email, status) VALUES (?, ?, ?, ?)",
+          [userId, testCode, account.email, "Inbox"]
+        );
+        return;
+      }
+
+      // Check Junk folder (with 5-second delay)
+      const foundInJunk = await searchFolder("junkemail");
+      if (foundInJunk) {
+        console.log(`📩 Test email FOUND in Outlook Junk`);
+        db.query(
+          "INSERT INTO TestResults (userId, testCode, email, status) VALUES (?, ?, ?, ?)",
+          [userId, testCode, account.email, "Spam"]
+        );
+        return;
+      }
+
+      // If not found in either folder
+      console.log(`📩 Test email NOT FOUND in Outlook`);
       db.query(
         "INSERT INTO TestResults (userId, testCode, email, status) VALUES (?, ?, ?, ?)",
-        [userId, testCode, account.email, "Inbox"]
+        [userId, testCode, account.email, "Not Found"]
       );
-      return;
     }
-
-    // Check Junk folder (with 5-second delay)
-    const foundInJunk = await searchFolder("junkemail");
-    if (foundInJunk) {
-      console.log(`📩 Test email FOUND in Outlook Junk`);
-      db.query(
-        "INSERT INTO TestResults (userId, testCode, email, status) VALUES (?, ?, ?, ?)",
-        [userId, testCode, account.email, "Spam"]
-      );
-      return;
-    }
-
-    // If not found in either folder
-    console.log(`📩 Test email NOT FOUND in Outlook`);
-    db.query(
-      "INSERT INTO TestResults (userId, testCode, email, status) VALUES (?, ?, ?, ?)",
-      [userId, testCode, account.email, "Not Found"]
-    );
   } catch (error) {
     console.error(`❌ Error fetching Outlook emails:`, error.message);
     db.query(
@@ -531,6 +614,7 @@ const checkBlacklists = async (ipOrDomain) => {
 
   return results;
 };
+
 const readSpamWords = () => {
   return new Promise((resolve, reject) => {
     const spamWords = [];
@@ -801,19 +885,52 @@ app.get("/get-previous-tests", authenticateUser, async (req, res) => {
     // Fetch results and analysis for each test recipient
     const previousTests = await Promise.all(
       testRecipients.map(async (recipient) => {
-        // Fetch test results for the current test code
+        // Fetch ALL test results for the current test code
         const [results] = await db
           .promise()
           .query("SELECT * FROM TestResults WHERE testCode = ?", [recipient.testCode]);
 
-        // Fetch analysis for each test result
-        const resultsWithAnalysis = await Promise.all(
-          results.map(async (result) => {
+        // Process results while maintaining order
+        const orderedResults = [];
+        
+        // First add pro-gmail accounts in order
+        const proGmailEmails = [
+          'Patricia@emaildeliveryreport.com',
+          'l.Patricia@emaildeliveryreport.net',
+          'lindaPatricia@xemaildeliveryreport.com',
+          'Linda@xemaildeliveryreport.com',
+          'linda.patricia@xemaildeliveryreport.com'
+        ];
+        
+        // Then add pro-outlook accounts in order
+        const proOutlookEmails = [
+          'brijesh@xleadoutreach.com',
+          'mahendra@xleadsconsulting.com',
+          'lakhendra@xleadsconsulting.com',
+          'xgrowthtech@xleadsconsulting.com',
+          'audit@xleadoutreach.com'
+        ];
+        
+        // Then add regular gmail accounts in order
+        const gmailEmails = [
+          'tmm003937@gmail.com',
+          'mta872679@gmail.com',
+          'houseisitter@gmail.com',
+          'malaikaarora983475@gmail.com',
+          'rheadutta096@gmail.com'
+        ];
+
+        // Combine all emails in the desired order
+        const allEmailsInOrder = [...proGmailEmails, ...proOutlookEmails, ...gmailEmails];
+
+        // Process results in the predefined order
+        for (const email of allEmailsInOrder) {
+          const result = results.find(r => r.email === email);
+          if (result) {
             const [analysis] = await db
               .promise()
               .query("SELECT * FROM EmailAnalysis WHERE testResultId = ?", [result.id]);
-        
-            // Helper function to safely parse JSON or return the original value
+
             const safeParse = (value) => {
               if (typeof value === 'string') {
                 try {
@@ -823,31 +940,32 @@ app.get("/get-previous-tests", authenticateUser, async (req, res) => {
                   return null;
                 }
               }
-              return value; // Return the original value if it's already an object
+              return value;
             };
-        
-            return {
+
+            orderedResults.push({
               email: result.email,
+              esp: espMapping[result.email] || 'unknown',
               status: result.status,
               subject: analysis[0]?.subject || "No Subject",
               from: analysis[0]?.fromEmail || "Unknown Sender",
               date: analysis[0]?.date || "Unknown Date",
               linkCount: analysis[0]?.linkStatuses ? safeParse(analysis[0].linkStatuses).length : 0,
-              linkStatuses: analysis[0]?.linkStatuses ? safeParse(analysis[0].linkStatuses) : [], // Add link statuses
+              linkStatuses: analysis[0]?.linkStatuses ? safeParse(analysis[0].linkStatuses) : [],
               domainBlacklistCheck: analysis[0]?.domainBlacklistCheck ? safeParse(analysis[0].domainBlacklistCheck) : [],
               ipBlacklistCheck: analysis[0]?.ipBlacklistCheck ? safeParse(analysis[0].ipBlacklistCheck) : [],
               spamWordAnalysis: analysis[0]?.spamWordAnalysis ? safeParse(analysis[0].spamWordAnalysis) : {},
-              mxRecords: analysis[0]?.mxRecords || null, // Add MX record status
-              mxRecordsData: analysis[0]?.mxRecordsData ? safeParse(analysis[0].mxRecordsData) : null, // Add MX records data
-              analysis: analysis[0] || null, // Include analysis data for each result
-            };
-          })
-        );
+              mxRecords: analysis[0]?.mxRecords || null,
+              mxRecordsData: analysis[0]?.mxRecordsData ? safeParse(analysis[0].mxRecordsData) : null,
+              analysis: analysis[0] || null,
+            });
+          }
+        }
 
         return {
           testCode: recipient.testCode,
-          sendingEmail: req.user.email, // Assuming the sending email is the user's email
-          results: resultsWithAnalysis, // Include results with analysis
+          sendingEmail: req.user.email,
+          results: orderedResults,
         };
       })
     );
@@ -919,7 +1037,7 @@ app.get("/get-latest-analysis/:testCode", authenticateUser, async (req, res) => 
 // SSE endpoint for live results
 app.get("/results-stream/:testCode", (req, res) => {
   const { testCode } = req.params;
-  const token = req.query.token; // Get token from query parameter
+  const token = req.query.token;
 
   if (!token) {
     return res.status(401).json({ error: "Access denied. No token provided." });
@@ -936,12 +1054,18 @@ app.get("/results-stream/:testCode", (req, res) => {
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders();
 
-    // Function to send updates to the client
+    // Keep track of sent results to avoid duplicates
+    const sentResults = new Set();
+
     const sendUpdate = (email, status) => {
-      res.write(`data: ${JSON.stringify({ email, status })}\n\n`);
+      const resultKey = `${email}:${status}`;
+      if (!sentResults.has(resultKey)) {
+        res.write(`data: ${JSON.stringify({ email, status })}\n\n`);
+        sentResults.add(resultKey);
+        console.log(`📤 Sent update for ${email}: ${status}`); // Debug log
+      }
     };
 
-    // Listen for new results in the database
     const checkForUpdates = () => {
       db.query(
         "SELECT email, status FROM TestResults WHERE testCode = ? AND userId = ?",
@@ -952,13 +1076,16 @@ app.get("/results-stream/:testCode", (req, res) => {
             return;
           }
 
-          // Send updates for each result
+          console.log(`🔍 Found ${results.length} results in database check`); // Debug log
           results.forEach((result) => {
             sendUpdate(result.email, result.status);
           });
         }
       );
     };
+
+    // Initial check
+    checkForUpdates();
 
     // Check for updates every 2 seconds
     const interval = setInterval(checkForUpdates, 2000);
@@ -967,8 +1094,11 @@ app.get("/results-stream/:testCode", (req, res) => {
     req.on("close", () => {
       clearInterval(interval);
       res.end();
+      console.log('🚪 Client disconnected from SSE stream');
     });
+
   } catch (err) {
+    console.error("SSE setup error:", err);
     res.status(400).json({ error: "Invalid token." });
   }
 });
