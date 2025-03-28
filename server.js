@@ -980,5 +980,74 @@ app.get("/results-stream/:testCode", (req, res) => {
   }
 });
 
+// SSE endpoint for live results
+app.get("/results-stream/:testCode", (req, res) => {
+  const { testCode } = req.params;
+  const token = req.query.token;
+
+  if (!token) {
+    return res.status(401).json({ error: "Access denied. No token provided." });
+  }
+
+  try {
+    // Verify the token
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const userId = decoded.id;
+
+    // Set headers for SSE
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+
+    // Keep track of sent results to avoid duplicates
+    const sentResults = new Set();
+
+    const sendUpdate = (email, status) => {
+      const resultKey = `${email}:${status}`;
+      if (!sentResults.has(resultKey)) {
+        res.write(`data: ${JSON.stringify({ email, status })}\n\n`);
+        sentResults.add(resultKey);
+        console.log(`📤 Sent update for ${email}: ${status}`); // Debug log
+      }
+    };
+
+    const checkForUpdates = () => {
+      db.query(
+        "SELECT email, status FROM TestResults WHERE testCode = ? AND userId = ?",
+        [testCode, userId],
+        (err, results) => {
+          if (err) {
+            console.error("❌ Database error:", err.message);
+            return;
+          }
+
+          console.log(`🔍 Found ${results.length} results in database check`); // Debug log
+          results.forEach((result) => {
+            sendUpdate(result.email, result.status);
+          });
+        }
+      );
+    };
+
+    // Initial check
+    checkForUpdates();
+
+    // Check for updates every 2 seconds
+    const interval = setInterval(checkForUpdates, 2000);
+
+    // Cleanup on client disconnect
+    req.on("close", () => {
+      clearInterval(interval);
+      res.end();
+      console.log('🚪 Client disconnected from SSE stream');
+    });
+
+  } catch (err) {
+    console.error("SSE setup error:", err);
+    res.status(400).json({ error: "Invalid token." });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Backend running on port ${PORT}`));
