@@ -790,59 +790,37 @@ const extractAuthResult = (header, type) => {
 
 app.get("/get-previous-tests", authenticateUser, async (req, res) => {
   try {
-    // Fetch all test recipients for the logged-in user
-    const [testRecipients] = await db
-      .promise()
-      .query("SELECT * FROM TestRecipients WHERE userId = ? ORDER BY timestamp DESC", [req.user.id]);
+    const { rows: testRecipients } = await db.query(
+      "SELECT * FROM TestRecipients WHERE userId = $1 ORDER BY timestamp DESC",
+      [req.user.id]
+    );
 
-    // Fetch results and analysis for each test recipient
     const previousTests = await Promise.all(
       testRecipients.map(async (recipient) => {
-        // Fetch ALL test results for the current test code
-        const [results] = await db
-          .promise()
-          .query("SELECT * FROM TestResults WHERE testCode = ?", [recipient.testCode]);
+        const { rows: results } = await db.query(
+          "SELECT * FROM TestResults WHERE testCode = $1",
+          [recipient.testcode]
+        );
 
-        // Process results while maintaining order
         const orderedResults = [];
-        
-        // First add pro-gmail accounts in order
-        const proGmailEmails = [
-          'Patricia@emaildeliveryreport.com',
-          'l.Patricia@emaildeliveryreport.net',
-          'lindaPatricia@xemaildeliveryreport.com',
-          'Linda@xemaildeliveryreport.com',
-          'linda.patricia@xemaildeliveryreport.com'
-        ];
-        
-        // Then add pro-outlook accounts in order
-        const proOutlookEmails = [
-          'brijesh@xleadoutreach.com',
-          'mahendra@xleadsconsulting.com',
-          'lakhendra@xleadsconsulting.com',
-          'xgrowthtech@xleadsconsulting.com',
-          'audit@xleadoutreach.com'
-        ];
-        
-        // Then add regular gmail accounts in order
-        const gmailEmails = [
-          'tmm003937@gmail.com',
-          'mta872679@gmail.com',
-          'houseisitter@gmail.com',
-          'malaikaarora983475@gmail.com',
-          'rheadutta096@gmail.com'
+        const allEmailsInOrder = [
+          ...['Patricia@emaildeliveryreport.com', 'l.Patricia@emaildeliveryreport.net', 
+              'lindaPatricia@xemaildeliveryreport.com', 'Linda@xemaildeliveryreport.com', 
+              'linda.patricia@xemaildeliveryreport.com'],
+          ...['brijesh@xleadoutreach.com', 'mahendra@xleadsconsulting.com', 
+              'lakhendra@xleadsconsulting.com', 'xgrowthtech@xleadsconsulting.com', 
+              'audit@xleadoutreach.com'],
+          ...['tmm003937@gmail.com', 'mta872679@gmail.com', 'houseisitter@gmail.com', 
+              'malaikaarora983475@gmail.com', 'rheadutta096@gmail.com']
         ];
 
-        // Combine all emails in the desired order
-        const allEmailsInOrder = [...proGmailEmails, ...proOutlookEmails, ...gmailEmails];
-
-        // Process results in the predefined order
         for (const email of allEmailsInOrder) {
           const result = results.find(r => r.email === email);
           if (result) {
-            const [analysis] = await db
-              .promise()
-              .query("SELECT * FROM EmailAnalysis WHERE testResultId = ?", [result.id]);
+            const { rows: analysis } = await db.query(
+              "SELECT * FROM EmailAnalysis WHERE testResultId = $1",
+              [result.id]
+            );
 
             const safeParse = (value) => {
               if (typeof value === 'string') {
@@ -861,22 +839,22 @@ app.get("/get-previous-tests", authenticateUser, async (req, res) => {
               esp: espMapping[result.email] || 'unknown',
               status: result.status,
               subject: analysis[0]?.subject || "No Subject",
-              from: analysis[0]?.fromEmail || "Unknown Sender",
+              from: analysis[0]?.fromemail || "Unknown Sender",
               date: analysis[0]?.date || "Unknown Date",
-              linkCount: analysis[0]?.linkStatuses ? safeParse(analysis[0].linkStatuses).length : 0,
-              linkStatuses: analysis[0]?.linkStatuses ? safeParse(analysis[0].linkStatuses) : [],
-              domainBlacklistCheck: analysis[0]?.domainBlacklistCheck ? safeParse(analysis[0].domainBlacklistCheck) : [],
-              ipBlacklistCheck: analysis[0]?.ipBlacklistCheck ? safeParse(analysis[0].ipBlacklistCheck) : [],
-              spamWordAnalysis: analysis[0]?.spamWordAnalysis ? safeParse(analysis[0].spamWordAnalysis) : {},
-              mxRecords: analysis[0]?.mxRecords || null,
-              mxRecordsData: analysis[0]?.mxRecordsData ? safeParse(analysis[0].mxRecordsData) : null,
+              linkCount: analysis[0]?.linkstatuses ? safeParse(analysis[0].linkstatuses).length : 0,
+              linkStatuses: analysis[0]?.linkstatuses ? safeParse(analysis[0].linkstatuses) : [],
+              domainBlacklistCheck: analysis[0]?.domainblacklistcheck ? safeParse(analysis[0].domainblacklistcheck) : [],
+              ipBlacklistCheck: analysis[0]?.ipblacklistcheck ? safeParse(analysis[0].ipblacklistcheck) : [],
+              spamWordAnalysis: analysis[0]?.spamwordanalysis ? safeParse(analysis[0].spamwordanalysis) : {},
+              mxRecords: analysis[0]?.mxrecords || null,
+              mxRecordsData: analysis[0]?.mxrecordsdata ? safeParse(analysis[0].mxrecordsdata) : null,
               analysis: analysis[0] || null,
             });
           }
         }
 
         return {
-          testCode: recipient.testCode,
+          testCode: recipient.testcode,
           sendingEmail: req.user.email,
           results: orderedResults,
         };
@@ -895,18 +873,15 @@ app.get("/get-latest-analysis/:testCode", authenticateUser, async (req, res) => 
   console.log("Fetching analysis for testCode:", testCode);
 
   try {
-    // Fetch the latest analysis directly for the given test code
-    const [analysis] = await db
-      .promise()
-      .query(
-        `SELECT ea.* 
-         FROM EmailAnalysis ea
-         JOIN TestResults tr ON ea.testResultId = tr.id
-         WHERE tr.testCode = ?
-         ORDER BY ea.timestamp DESC
-         LIMIT 1`,
-        [testCode]
-      );
+    const { rows: analysis } = await db.query(
+      `SELECT ea.* 
+       FROM EmailAnalysis ea
+       JOIN TestResults tr ON ea.testResultId = tr.id
+       WHERE tr.testCode = $1
+       ORDER BY ea.timestamp DESC
+       LIMIT 1`,
+      [testCode]
+    );
 
     if (analysis.length === 0) {
       console.log("No analysis found for testCode:", testCode);
@@ -915,7 +890,6 @@ app.get("/get-latest-analysis/:testCode", authenticateUser, async (req, res) => 
 
     console.log("Analysis data found:", analysis[0]);
 
-    // Helper function to safely parse JSON or return the original value
     const safeParse = (value) => {
       if (typeof value === 'string') {
         try {
@@ -925,21 +899,19 @@ app.get("/get-latest-analysis/:testCode", authenticateUser, async (req, res) => 
           return null;
         }
       }
-      return value; // Return the original value if it's already an object
+      return value;
     };
 
-    // Parse JSON fields if they are stored as strings
     const parsedAnalysis = {
       ...analysis[0],
       authentication: safeParse(analysis[0].authentication),
-      domainBlacklistCheck: safeParse(analysis[0].domainBlacklistCheck),
-      ipBlacklistCheck: safeParse(analysis[0].ipBlacklistCheck),
-      linkStatuses: safeParse(analysis[0].linkStatuses),
-      spamWordAnalysis: safeParse(analysis[0].spamWordAnalysis),
-      mxRecordsData: safeParse(analysis[0].mxRecordsData),
+      domainblacklistcheck: safeParse(analysis[0].domainblacklistcheck),
+      ipblacklistcheck: safeParse(analysis[0].ipblacklistcheck),
+      linkstatuses: safeParse(analysis[0].linkstatuses),
+      spamwordanalysis: safeParse(analysis[0].spamwordanalysis),
+      mxrecordsdata: safeParse(analysis[0].mxrecordsdata),
     };
 
-    // Return the latest analysis
     res.json(parsedAnalysis);
   } catch (error) {
     console.error("❌ Error fetching latest analysis:", error.message);
@@ -947,7 +919,6 @@ app.get("/get-latest-analysis/:testCode", authenticateUser, async (req, res) => 
   }
 });
 
-// SSE endpoint for live results
 app.get("/results-stream/:testCode", (req, res) => {
   const { testCode } = req.params;
   const token = req.query.token;
@@ -957,17 +928,14 @@ app.get("/results-stream/:testCode", (req, res) => {
   }
 
   try {
-    // Verify the token
     const decoded = jwt.verify(token, JWT_SECRET);
     const userId = decoded.id;
 
-    // Set headers for SSE
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders();
 
-    // Keep track of sent results to avoid duplicates
     const sentResults = new Set();
 
     const sendUpdate = (email, status) => {
@@ -975,21 +943,21 @@ app.get("/results-stream/:testCode", (req, res) => {
       if (!sentResults.has(resultKey)) {
         res.write(`data: ${JSON.stringify({ email, status })}\n\n`);
         sentResults.add(resultKey);
-        console.log(`📤 Sent update for ${email}: ${status}`); // Debug log
+        console.log(`📤 Sent update for ${email}: ${status}`);
       }
     };
 
     const checkForUpdates = () => {
       db.query(
-        "SELECT email, status FROM TestResults WHERE testCode = ? AND userId = ?",
+        "SELECT email, status FROM TestResults WHERE testCode = $1 AND userId = $2",
         [testCode, userId],
-        (err, results) => {
+        (err, { rows: results }) => {
           if (err) {
             console.error("❌ Database error:", err.message);
             return;
           }
 
-          console.log(`🔍 Found ${results.length} results in database check`); // Debug log
+          console.log(`🔍 Found ${results.length} results in database check`);
           results.forEach((result) => {
             sendUpdate(result.email, result.status);
           });
@@ -997,13 +965,9 @@ app.get("/results-stream/:testCode", (req, res) => {
       );
     };
 
-    // Initial check
     checkForUpdates();
-
-    // Check for updates every 2 seconds
     const interval = setInterval(checkForUpdates, 2000);
 
-    // Cleanup on client disconnect
     req.on("close", () => {
       clearInterval(interval);
       res.end();
@@ -1016,4 +980,5 @@ app.get("/results-stream/:testCode", (req, res) => {
   }
 });
 
-app.listen(3000, () => console.log("🚀 Backend running on port 3000"));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Backend running on port ${PORT}`));
