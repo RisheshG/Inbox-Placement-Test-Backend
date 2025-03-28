@@ -1,7 +1,7 @@
 const express = require("express");
 const { v4: uuidv4 } = require("uuid");
 const imaps = require("imap-simple");
-const mysql = require("mysql2");
+const { Pool } = require("pg"); // Changed from mysql2 to pg
 const moment = require("moment");
 const axios = require("axios");
 const qs = require("querystring");
@@ -35,70 +35,92 @@ const espMapping = {
   'rheadutta096@gmail.com': 'gmail'
 };
 
-
 const app = express();
-app.use(express.json({ limit: "10mb" })); // Fix JSON parsing issue
-app.use(cors()); // Enable CORS
+app.use(express.json({ limit: "10mb" }));
+app.use(cors());
 
-const db = mysql.createConnection({
-  host: "localhost",
-  user: "root",
-  password: "Rishesh@123",
-  database: "inboxPlacement",
+// PostgreSQL connection with your Render credentials
+const db = new Pool({
+  user: 'inbox_placement_db_user',
+  host: 'dpg-cvja253ipnbc73e08f8g-a.oregon-postgres.render.com',
+  database: 'inbox_placement_db',
+  password: 'S9gnQfIRBkaceUXHD5okchdpObouAP6X',
+  port: 5432,
+  ssl: {
+    rejectUnauthorized: false // Required for Render's PostgreSQL
+  }
 });
 
-db.connect((err) => {
-  if (err) console.error("❌ Database connection failed:", err.message);
-  else console.log("✅ Connected to MySQL database.");
-});
+// Test database connection
+db.connect()
+  .then(() => console.log("✅ Connected to PostgreSQL database"))
+  .catch(err => console.error("❌ Database connection failed:", err.message));
 
 // Create necessary tables
-db.query(`
-  CREATE TABLE IF NOT EXISTS Users (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    email VARCHAR(255) UNIQUE NOT NULL,
-    password VARCHAR(255) NOT NULL,
-    credits INT DEFAULT 10,
-    createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  )
-`);
+const createTables = async () => {
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS Users (
+        id SERIAL PRIMARY KEY,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password VARCHAR(255) NOT NULL,
+        credits INTEGER DEFAULT 10,
+        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
-db.query(`
-  CREATE TABLE IF NOT EXISTS TestResults (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    userId INT,
-    testCode VARCHAR(255),
-    email VARCHAR(255),
-    status VARCHAR(255),
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (userId) REFERENCES Users(id)
-  )
-`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS TestResults (
+        id SERIAL PRIMARY KEY,
+        userId INTEGER,
+        testCode VARCHAR(255),
+        email VARCHAR(255),
+        status VARCHAR(255),
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        emailContent TEXT,
+        emailHeaders TEXT,
+        FOREIGN KEY (userId) REFERENCES Users(id)
+      )
+    `);
 
-db.query(`
-  CREATE TABLE IF NOT EXISTS TestRecipients (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    userId INT,
-    testCode VARCHAR(255),
-    recipients TEXT,
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (userId) REFERENCES Users(id)
-  )
-`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS TestRecipients (
+        id SERIAL PRIMARY KEY,
+        userId INTEGER,
+        testCode VARCHAR(255),
+        recipients TEXT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (userId) REFERENCES Users(id)
+      )
+    `);
 
-db.query(`
-  CREATE TABLE IF NOT EXISTS EmailAnalysis (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    testResultId INT,
-    authentication JSON,
-    domainBlacklistCheck JSON,
-    ipBlacklistCheck JSON,
-    linkStatuses JSON,
-    spamWordAnalysis JSON,
-    emailContent TEXT,
-    FOREIGN KEY (testResultId) REFERENCES TestResults(id)
-  )
-`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS EmailAnalysis (
+        id SERIAL PRIMARY KEY,
+        testResultId INTEGER,
+        subject TEXT,
+        fromEmail TEXT,
+        date TEXT,
+        authentication JSON,
+        domainBlacklistCheck JSON,
+        ipBlacklistCheck JSON,
+        linkStatuses JSON,
+        spamWordAnalysis JSON,
+        emailContent TEXT,
+        mxRecords TEXT,
+        mxRecordsData JSON,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (testResultId) REFERENCES TestResults(id)
+      )
+    `);
+
+    console.log("✅ Tables created or already exist");
+  } catch (err) {
+    console.error("❌ Error creating tables:", err.message);
+  }
+};
+
+createTables();
 
 const gmailAccounts = [
   { email: "tmm003937@gmail.com", password: "fekg mego jqlw pizn" },
@@ -121,8 +143,7 @@ const outlookAccounts = [
   { email: "brijesh@xleadoutreach.com", client_id: "29c8707e-876a-4833-8c31-4cad33a8ac0b", tenant_id: "751d98b4-f8be-4510-9ccc-97bdb4e50d02", client_secret: "wn28Q~0N-DlfWfyiSQfY.GqFLAfN4g1EuuNkhcHy" },
 ];
 
-
-const JWT_SECRET = "your_jwt_secret_key"; // Replace with a secure key
+const JWT_SECRET = "your_jwt_secret_key";
 
 // Middleware to authenticate users
 const authenticateUser = (req, res, next) => {
@@ -149,9 +170,10 @@ app.post("/register", async (req, res) => {
 
   try {
     // Check if user already exists
-    const [existingUser] = await db
-      .promise()
-      .query("SELECT * FROM Users WHERE email = ?", [email]);
+    const { rows: existingUser } = await db.query(
+      "SELECT * FROM Users WHERE email = $1", 
+      [email]
+    );
 
     if (existingUser.length > 0) {
       return res.status(400).json({ error: "User already exists." });
@@ -161,12 +183,10 @@ app.post("/register", async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Insert new user into the database
-    await db
-      .promise()
-      .query("INSERT INTO Users (email, password) VALUES (?, ?)", [
-        email,
-        hashedPassword,
-      ]);
+    await db.query(
+      "INSERT INTO Users (email, password) VALUES ($1, $2)", 
+      [email, hashedPassword]
+    );
 
     res.status(201).json({ message: "User registered successfully." });
   } catch (err) {
@@ -184,9 +204,10 @@ app.post("/login", async (req, res) => {
 
   try {
     // Find the user by email
-    const [user] = await db
-      .promise()
-      .query("SELECT * FROM Users WHERE email = ?", [email]);
+    const { rows: user } = await db.query(
+      "SELECT * FROM Users WHERE email = $1", 
+      [email]
+    );
 
     if (user.length === 0) {
       return res.status(400).json({ error: "Invalid email or password." });
@@ -210,19 +231,17 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// Add this endpoint to your backend code
 app.get("/user", authenticateUser, async (req, res) => {
   try {
-    // Fetch the user's details from the database
-    const [user] = await db
-      .promise()
-      .query("SELECT email, credits FROM Users WHERE id = ?", [req.user.id]);
+    const { rows: user } = await db.query(
+      "SELECT email, credits FROM Users WHERE id = $1", 
+      [req.user.id]
+    );
 
     if (user.length === 0) {
       return res.status(404).json({ error: "User not found." });
     }
 
-    // Return the user's email and credits
     res.json({ email: user[0].email, credits: user[0].credits });
   } catch (err) {
     console.error("❌ Error fetching user details:", err.message);
@@ -230,32 +249,28 @@ app.get("/user", authenticateUser, async (req, res) => {
   }
 });
 
-// Generate a test code and store recipients
-app.post("/generate-test-code", authenticateUser, (req, res) => {
-  const { recipients } = req.body; // Expecting a comma-separated string of emails
+app.post("/generate-test-code", authenticateUser, async (req, res) => {
+  const { recipients } = req.body;
   if (!recipients) {
     return res.status(400).json({ error: "Recipients are required." });
   }
 
   const testCode = uuidv4();
 
-  // Store the test code and recipients in the database
-  db.query(
-    "INSERT INTO TestRecipients (userId, testCode, recipients) VALUES (?, ?, ?)",
-    [req.user.id, testCode, recipients],
-    (err) => {
-      if (err) {
-        console.error("❌ Failed to store recipients:", err.message);
-        return res.status(500).json({ error: "Failed to store recipients." });
-      }
+  try {
+    await db.query(
+      "INSERT INTO TestRecipients (userId, testCode, recipients) VALUES ($1, $2, $3)",
+      [req.user.id, testCode, recipients]
+    );
 
-      console.log(`✅ Test code ${testCode} generated for recipients: ${recipients}`);
-      res.json({ testCode, recipients });
-    }
-  );
+    console.log(`✅ Test code ${testCode} generated for recipients: ${recipients}`);
+    res.json({ testCode, recipients });
+  } catch (err) {
+    console.error("❌ Failed to store recipients:", err.message);
+    res.status(500).json({ error: "Failed to store recipients." });
+  }
 });
 
-// Update user credits
 app.post("/update-credits", authenticateUser, async (req, res) => {
   const { userId, credits } = req.body;
 
@@ -264,19 +279,19 @@ app.post("/update-credits", authenticateUser, async (req, res) => {
   }
 
   try {
-    // Check if the user exists
-    const [user] = await db
-      .promise()
-      .query("SELECT * FROM Users WHERE id = ?", [userId]);
+    const { rows: user } = await db.query(
+      "SELECT * FROM Users WHERE id = $1", 
+      [userId]
+    );
 
     if (user.length === 0) {
       return res.status(404).json({ error: "User not found." });
     }
 
-    // Update the user's credits
-    await db
-      .promise()
-      .query("UPDATE Users SET credits = ? WHERE id = ?", [credits, userId]);
+    await db.query(
+      "UPDATE Users SET credits = $1 WHERE id = $2", 
+      [credits, userId]
+    );
 
     res.json({ message: "User credits updated successfully.", userId, credits });
   } catch (err) {
@@ -285,7 +300,6 @@ app.post("/update-credits", authenticateUser, async (req, res) => {
   }
 });
 
-// Check mailboxes for results
 app.post("/check-mails", authenticateUser, async (req, res) => {
   const { testCode } = req.body;
   if (!testCode) {
@@ -293,18 +307,15 @@ app.post("/check-mails", authenticateUser, async (req, res) => {
   }
 
   try {
-    // Deduct 1 credit
-    await db
-      .promise()
-      .query("UPDATE Users SET credits = credits - 1 WHERE id = ?", [req.user.id]);
+    await db.query(
+      "UPDATE Users SET credits = credits - 1 WHERE id = $1", 
+      [req.user.id]
+    );
 
-    // Fetch recipients for the test code
-    const [recipientsRow] = await db
-      .promise()
-      .query("SELECT recipients FROM TestRecipients WHERE testCode = ? AND userId = ?", [
-        testCode,
-        req.user.id,
-      ]);
+    const { rows: recipientsRow } = await db.query(
+      "SELECT recipients FROM TestRecipients WHERE testCode = $1 AND userId = $2",
+      [testCode, req.user.id]
+    );
 
     if (!recipientsRow.length) {
       return res.status(404).json({ error: "Test code not found." });
@@ -313,21 +324,13 @@ app.post("/check-mails", authenticateUser, async (req, res) => {
     const recipients = recipientsRow[0].recipients.split(",");
     const fiveMinutesAgo = moment().subtract(5, "minutes");
 
-    // Process mailbox checks asynchronously
     recipients.forEach((email) => {
       const trimmedEmail = email.trim();
+      const gmailAccount = gmailAccounts.find(a => a.email === trimmedEmail);
+      const outlookAccount = outlookAccounts.find(a => a.email === trimmedEmail);
 
-      // Check if the email is a Gmail account
-      const gmailAccount = gmailAccounts.find((account) => account.email === trimmedEmail);
-      if (gmailAccount) {
-        checkMailbox(gmailAccount, testCode, fiveMinutesAgo, req.user.id);
-      }
-
-      // Check if the email is an Outlook account
-      const outlookAccount = outlookAccounts.find((account) => account.email === trimmedEmail);
-      if (outlookAccount) {
-        checkOutlookMailbox(outlookAccount, testCode, req.user.id);
-      }
+      if (gmailAccount) checkMailbox(gmailAccount, testCode, fiveMinutesAgo, req.user.id);
+      if (outlookAccount) checkOutlookMailbox(outlookAccount, testCode, req.user.id);
     });
 
     res.json({ message: `📬 Mailbox check initiated for ${testCode}` });
@@ -337,7 +340,6 @@ app.post("/check-mails", authenticateUser, async (req, res) => {
   }
 });
 
-// Function to check mailbox for a single email (Gmail)
 const checkMailbox = async (account, testCode, fiveMinutesAgo, userId) => {
   const config = {
     imap: {
@@ -352,7 +354,6 @@ const checkMailbox = async (account, testCode, fiveMinutesAgo, userId) => {
   };
 
   try {
-    // Add a 10-second delay before connecting to the IMAP server
     console.log("⏳ Waiting for 10 seconds before fetching emails...");
     await new Promise((resolve) => setTimeout(resolve, 10000));
 
@@ -373,18 +374,16 @@ const checkMailbox = async (account, testCode, fiveMinutesAgo, userId) => {
           const emailContent = body;
           const emailHeaders = JSON.stringify(headers);
 
-          // Store the email content and headers in the database
-          await db.promise().query(
-            "INSERT INTO TestResults (userId, testCode, email, status, emailContent, emailHeaders) VALUES (?, ?, ?, ?, ?, ?)",
+          await db.query(
+            "INSERT INTO TestResults (userId, testCode, email, status, emailContent, emailHeaders) VALUES ($1, $2, $3, $4, $5, $6)",
             [userId, testCode, account.email, folderName === "INBOX" ? "Inbox" : "Spam", emailContent, emailHeaders]
           );
 
           console.log(`📨 Found test email in ${folderName} for ${account.email}`);
 
-          // Trigger analysis automatically for tmm003937@gmail.com
           if (account.email === "tmm003937@gmail.com") {
             console.log("🔍 Starting automatic analysis for tmm003937@gmail.com...");
-            await analyzeEmail(account.email, testCode); // Start analysis
+            await analyzeEmail(account.email, testCode);
           }
 
           await connection.end();
@@ -395,14 +394,12 @@ const checkMailbox = async (account, testCode, fiveMinutesAgo, userId) => {
     };
 
     const foundInInbox = await searchEmails("INBOX");
-    if (foundInInbox) {
-      return;
-    }
+    if (foundInInbox) return;
 
     const foundInSpam = await searchEmails("[Gmail]/Spam");
     if (!foundInSpam) {
-      await db.promise().query(
-        "INSERT INTO TestResults (userId, testCode, email, status) VALUES (?, ?, ?, ?)",
+      await db.query(
+        "INSERT INTO TestResults (userId, testCode, email, status) VALUES ($1, $2, $3, $4)",
         [userId, testCode, account.email, "Not Found"]
       );
     }
@@ -411,24 +408,19 @@ const checkMailbox = async (account, testCode, fiveMinutesAgo, userId) => {
     await connection.end();
   } catch (error) {
     console.error(`❌ Error with ${account.email}:`, error.message);
-    await db.promise().query(
-      "INSERT INTO TestResults (userId, testCode, email, status) VALUES (?, ?, ?, ?)",
+    await db.query(
+      "INSERT INTO TestResults (userId, testCode, email, status) VALUES ($1, $2, $3, $4)",
       [userId, testCode, account.email, "Error"]
     );
   }
 };
 
-// Function to check mailbox for Outlook
 const checkOutlookMailbox = async (account, testCode, userId) => {
   try {
     console.log(`📡 Fetching emails for Outlook account: ${account.email}`);
-
-    // Wait for 5 seconds before proceeding
-    console.log("⏳ Waiting for 15 seconds before fetching emails...");
     await new Promise((resolve) => setTimeout(resolve, 15000));
 
     if (account.password) {
-      // Use IMAP for app password-based accounts
       const config = {
         imap: {
           user: account.email,
@@ -457,9 +449,8 @@ const checkOutlookMailbox = async (account, testCode, userId) => {
             const emailContent = body;
             const emailHeaders = JSON.stringify(headers);
 
-            // Store the email content and headers in the database
-            await db.promise().query(
-              "INSERT INTO TestResults (userId, testCode, email, status, emailContent, emailHeaders) VALUES (?, ?, ?, ?, ?, ?)",
+            await db.query(
+              "INSERT INTO TestResults (userId, testCode, email, status, emailContent, emailHeaders) VALUES ($1, $2, $3, $4, $5, $6)",
               [userId, testCode, account.email, folderName === "INBOX" ? "Inbox" : "Spam", emailContent, emailHeaders]
             );
 
@@ -472,14 +463,12 @@ const checkOutlookMailbox = async (account, testCode, userId) => {
       };
 
       const foundInInbox = await searchEmails("INBOX");
-      if (foundInInbox) {
-        return;
-      }
+      if (foundInInbox) return;
 
       const foundInSpam = await searchEmails("Junk");
       if (!foundInSpam) {
-        await db.promise().query(
-          "INSERT INTO TestResults (userId, testCode, email, status) VALUES (?, ?, ?, ?)",
+        await db.query(
+          "INSERT INTO TestResults (userId, testCode, email, status) VALUES ($1, $2, $3, $4)",
           [userId, testCode, account.email, "Not Found"]
         );
       }
@@ -487,7 +476,6 @@ const checkOutlookMailbox = async (account, testCode, userId) => {
       console.log(`📨 Email for ${account.email} found in ${foundInSpam ? "SPAM" : "NOT FOUND"}`);
       await connection.end();
     } else {
-      // Use Microsoft Graph API for OAuth-based accounts
       const tokenResponse = await axios.post(
         `https://login.microsoftonline.com/${account.tenant_id}/oauth2/v2.0/token`,
         qs.stringify({
@@ -508,8 +496,6 @@ const checkOutlookMailbox = async (account, testCode, userId) => {
 
       const searchFolder = async (folderName) => {
         console.log(`🔍 Searching folder: ${folderName}`);
-
-        // Add a 5-second delay before searching this folder
         await new Promise((resolve) => setTimeout(resolve, 5000));
 
         const messagesResponse = await axios.get(
@@ -530,40 +516,36 @@ const checkOutlookMailbox = async (account, testCode, userId) => {
         });
       };
 
-      // Check Inbox folder (with 5-second delay)
       const foundInInbox = await searchFolder("inbox");
-
       if (foundInInbox) {
         console.log(`📩 Test email FOUND in Outlook Inbox`);
-        db.query(
-          "INSERT INTO TestResults (userId, testCode, email, status) VALUES (?, ?, ?, ?)",
+        await db.query(
+          "INSERT INTO TestResults (userId, testCode, email, status) VALUES ($1, $2, $3, $4)",
           [userId, testCode, account.email, "Inbox"]
         );
         return;
       }
 
-      // Check Junk folder (with 5-second delay)
       const foundInJunk = await searchFolder("junkemail");
       if (foundInJunk) {
         console.log(`📩 Test email FOUND in Outlook Junk`);
-        db.query(
-          "INSERT INTO TestResults (userId, testCode, email, status) VALUES (?, ?, ?, ?)",
+        await db.query(
+          "INSERT INTO TestResults (userId, testCode, email, status) VALUES ($1, $2, $3, $4)",
           [userId, testCode, account.email, "Spam"]
         );
         return;
       }
 
-      // If not found in either folder
       console.log(`📩 Test email NOT FOUND in Outlook`);
-      db.query(
-        "INSERT INTO TestResults (userId, testCode, email, status) VALUES (?, ?, ?, ?)",
+      await db.query(
+        "INSERT INTO TestResults (userId, testCode, email, status) VALUES ($1, $2, $3, $4)",
         [userId, testCode, account.email, "Not Found"]
       );
     }
   } catch (error) {
     console.error(`❌ Error fetching Outlook emails:`, error.message);
-    db.query(
-      "INSERT INTO TestResults (userId, testCode, email, status) VALUES (?, ?, ?, ?)",
+    await db.query(
+      "INSERT INTO TestResults (userId, testCode, email, status) VALUES ($1, $2, $3, $4)",
       [userId, testCode, account.email, "Error"]
     );
   }
@@ -571,16 +553,12 @@ const checkOutlookMailbox = async (account, testCode, userId) => {
 
 const extractIPFromHeaders = (headers) => {
   const receivedHeaders = headers["received"] || [];
-  const ipRegex = /\b(?:\d{1,3}\.){3}\d{1,3}\b/; // Regex to match IPv4 addresses
-
+  const ipRegex = /\b(?:\d{1,3}\.){3}\d{1,3}\b/;
   for (const header of receivedHeaders) {
     const match = header.match(ipRegex);
-    if (match) {
-      return match[0]; // Return the first IP address found
-    }
+    if (match) return match[0];
   }
-
-  return null; // No IP address found
+  return null;
 };
 
 const checkBlacklists = async (ipOrDomain) => {
@@ -593,14 +571,12 @@ const checkBlacklists = async (ipOrDomain) => {
   ];
 
   const results = [];
-
   for (const blacklist of blacklists) {
     try {
       const response = await fetch(
         `https://dns.google/resolve?name=${ipOrDomain}.${blacklist.dns}&type=A`
       );
       const data = await response.json();
-
       if (data.Answer && data.Answer.length > 0) {
         results.push({ blacklist: blacklist.name, listed: true, details: data.Answer });
       } else {
@@ -611,7 +587,6 @@ const checkBlacklists = async (ipOrDomain) => {
       results.push({ blacklist: blacklist.name, listed: false, details: null });
     }
   }
-
   return results;
 };
 
@@ -620,10 +595,7 @@ const readSpamWords = () => {
     const spamWords = [];
     fs.createReadStream("spam_words.csv")
       .pipe(csv())
-      .on("data", (row) => {
-        // Assuming each row has a single column with the spam word
-        spamWords.push(Object.values(row)[0]);
-      })
+      .on("data", (row) => spamWords.push(Object.values(row)[0]))
       .on("end", () => {
         console.log("✅ Spam words loaded from CSV");
         resolve(spamWords);
@@ -635,23 +607,14 @@ const readSpamWords = () => {
   });
 };
 
-// Function to check spam words in the email content
 const checkSpamWordsLocally = async (htmlContent) => {
   try {
-    // Load the HTML content using cheerio
     const $ = cheerio.load(htmlContent);
-
-    // Extract plain text content from the HTML
-    const plainText = $("body").text().toLowerCase(); // Convert to lowercase for case-insensitive matching
-
-    // Read spam words from the CSV file
+    const plainText = $("body").text().toLowerCase();
     const spamWords = await readSpamWords();
-
-    // Check if any spam words are present in the plain text
     const foundSpamWords = spamWords.filter((word) =>
       plainText.includes(word.toLowerCase())
     );
-
     return {
       spamWordsFound: foundSpamWords.length > 0,
       spamWordsList: foundSpamWords,
@@ -665,30 +628,23 @@ const checkSpamWordsLocally = async (htmlContent) => {
   }
 };
 
-// Get email analysis (headers and content)
 app.get("/analyze-email/:testCode", authenticateUser, async (req, res) => {
   const { testCode } = req.params;
-
   try {
-    // Check if the test code exists and belongs to the user
-    const [testRecipient] = await db
-      .promise()
-      .query("SELECT * FROM TestRecipients WHERE testCode = ? AND userId = ?", [
-        testCode,
-        req.user.id,
-      ]);
+    const { rows: testRecipient } = await db.query(
+      "SELECT * FROM TestRecipients WHERE testCode = $1 AND userId = $2",
+      [testCode, req.user.id]
+    );
 
     if (testRecipient.length === 0) {
       return res.status(404).json({ error: "Test code not found" });
     }
 
     const recipients = testRecipient[0].recipients.split(",");
-
-    // We'll analyze the first Gmail account in the recipients list
     let targetEmail = null;
     for (const email of recipients) {
       const trimmedEmail = email.trim();
-      if (trimmedEmail !== outlookAccount.email && trimmedEmail.includes("@gmail.com")) {
+      if (trimmedEmail.includes("@gmail.com")) {
         targetEmail = trimmedEmail;
         break;
       }
@@ -706,68 +662,51 @@ app.get("/analyze-email/:testCode", authenticateUser, async (req, res) => {
   }
 });
 
-// Function to analyze email and extract relevant information
 const analyzeEmail = async (email, testCode) => {
   try {
-    // Retrieve stored email content and headers from the database
-    const [result] = await db
-      .promise()
-      .query("SELECT id, emailContent, emailHeaders FROM TestResults WHERE email = ? AND testCode = ?", [
-        email,
-        testCode,
-      ]);
+    const { rows: result } = await db.query(
+      "SELECT id, emailContent, emailHeaders FROM TestResults WHERE email = $1 AND testCode = $2",
+      [email, testCode]
+    );
 
-    if (!result.length || !result[0].emailContent || !result[0].emailHeaders) {
+    if (!result.length || !result[0].emailcontent || !result[0].emailheaders) {
       return { error: "No email content found for analysis." };
     }
 
     const testResultId = result[0].id;
-    const emailContent = result[0].emailContent;
-    const emailHeaders = JSON.parse(result[0].emailHeaders);
+    const emailContent = result[0].emailcontent;
+    const emailHeaders = JSON.parse(result[0].emailheaders);
 
-    // Extract subject, from, and date from headers
     const subject = Array.isArray(emailHeaders.subject) ? emailHeaders.subject[0] : (emailHeaders.subject || "No Subject");
     const from = Array.isArray(emailHeaders.from) ? emailHeaders.from[0] : (emailHeaders.from || "Unknown Sender");
     const date = Array.isArray(emailHeaders.date) ? emailHeaders.date[0] : (emailHeaders.date || "Unknown Date");
 
-    // Extract authentication headers
     const dkim = extractAuthResult(emailHeaders, "dkim");
     const spf = extractAuthResult(emailHeaders, "spf");
     const dmarc = extractAuthResult(emailHeaders, "dmarc");
 
-    // Extract plain text content from the email using Cheerio
     const $ = cheerio.load(emailContent);
-    const plainTextContent = $("body").text(); // Extract plain text content
-
-    // Extract links from the plain text content
+    const plainTextContent = $("body").text();
     const linkRegex = /https?:\/\/[^\s"<>()]+/g;
     const links = plainTextContent.match(linkRegex) || [];
-
-    // Filter out invalid links and remove duplicates
     const validLinks = [...new Set(links)].filter((link) => {
       try {
-        new URL(link); // Validate URL
+        new URL(link);
         return true;
       } catch (err) {
-        return false; // Invalid URL
+        return false;
       }
     });
 
-    // Check if links are broken
     const checkLink = async (link) => {
       try {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 5000); // Set a timeout of 5 seconds
-
+        const timeout = setTimeout(() => controller.abort(), 5000);
         let response = await fetch(link, { method: "HEAD", signal: controller.signal });
-
         clearTimeout(timeout);
-
         if (!response.ok) {
-          // If HEAD fails, try a GET request
           response = await fetch(link, { method: "GET", signal: controller.signal });
         }
-
         return { link, status: response.ok ? "OK" : "Broken" };
       } catch (error) {
         return { link, status: "Broken", error: error.message || "Request failed" };
@@ -775,76 +714,52 @@ const analyzeEmail = async (email, testCode) => {
     };
 
     const linkStatuses = await Promise.all(validLinks.map(checkLink));
-
-    console.log(linkStatuses);
-
-    // Extract and clean domain from the "from" field
-    const domain = from.split('@')[1]?.replace(/[^a-zA-Z0-9.-]/g, ''); // Remove invalid characters
-
-    // Extract IP address from the "Received" header
+    const domain = from.split('@')[1]?.replace(/[^a-zA-Z0-9.-]/g, '');
     const receivedHeaders = emailHeaders["received"] || [];
     const receivedHeader = Array.isArray(receivedHeaders) ? receivedHeaders.join(" ") : receivedHeaders;
-    const ipRegex = /\b(?:\d{1,3}\.){3}\d{1,3}\b/; // Regex to match an IP address
+    const ipRegex = /\b(?:\d{1,3}\.){3}\d{1,3}\b/;
     const ipAddress = receivedHeader.match(ipRegex)?.[0] || null;
 
-    // Check MX records for the domain using dns.google API
     let mxRecordsExist = false;
     let mxRecordsData = null;
-
     if (domain) {
-      console.log(`🔍 Checking MX records for domain: ${domain}`);
-
       try {
         const response = await fetch(`https://dns.google/resolve?name=${domain}&type=MX`);
         const data = await response.json();
-
-        console.log(`📄 Data returned for MX records of ${domain}:`, data);
-
         if (data.Status === 0 && data.Answer && data.Answer.length > 0) {
           mxRecordsExist = true;
           mxRecordsData = data.Answer;
-        } else if (data.Status === 3) {
-          console.log(`❌ Domain does not exist (NXDOMAIN): ${domain}`);
-        } else {
-          console.log(`❌ No MX records found for domain: ${domain}`);
         }
       } catch (error) {
         console.error(`❌ Error checking MX records for ${domain}:`, error.message);
       }
-    } else {
-      console.log(`❌ Invalid domain extracted from "from" field: ${from}`);
     }
 
-    // Check blacklists for the domain
     const domainBlacklistResults = domain ? await checkBlacklists(domain) : [];
-
-    // Check blacklists for the IP address
     const ipBlacklistResults = ipAddress ? await checkBlacklists(ipAddress) : [];
-
-    // Check for spam words using the local CSV file
     const spamWordAnalysis = await checkSpamWordsLocally(emailContent);
 
-    // Store the analysis data in the EmailAnalysis table
-    await db.promise().query(
-      "INSERT INTO EmailAnalysis (testResultId, subject, fromEmail, date, authentication, domainBlacklistCheck, ipBlacklistCheck, linkStatuses, spamWordAnalysis, emailContent, mxRecords, mxRecordsData, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    await db.query(
+      `INSERT INTO EmailAnalysis (
+        testResultId, subject, fromEmail, date, authentication, 
+        domainBlacklistCheck, ipBlacklistCheck, linkStatuses, 
+        spamWordAnalysis, emailContent, mxRecords, mxRecordsData
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         testResultId,
         subject,
         from,
         date,
-        JSON.stringify({ dkim, spf, dmarc, mxRecords: mxRecordsExist ? "pass" : "fail" }), // Include MX record status in authentication
+        JSON.stringify({ dkim, spf, dmarc, mxRecords: mxRecordsExist ? "pass" : "fail" }),
         JSON.stringify(domainBlacklistResults),
         JSON.stringify(ipBlacklistResults),
         JSON.stringify(linkStatuses),
         JSON.stringify(spamWordAnalysis),
         emailContent,
-        mxRecordsExist ? "Exists" : "Does not exist", // Add MX record status as a separate field
-        JSON.stringify(mxRecordsData), // Add MX records data
-        new Date(),
+        mxRecordsExist ? "Exists" : "Does not exist",
+        JSON.stringify(mxRecordsData),
       ]
     );
-
-    console.log(`📊 Analysis complete for email with subject: ${subject}`);
 
     return {
       subject,
@@ -854,11 +769,11 @@ const analyzeEmail = async (email, testCode) => {
       content: emailContent,
       linkCount: linkStatuses.length,
       linkStatuses,
-      mxRecords: mxRecordsExist ? "Exists" : "Does not exist", // Add MX record status
-      mxRecordsData: mxRecordsData, // Include the raw MX records data
-      domainBlacklistResults, // Include detailed domain blacklist results
-      ipBlacklistResults, // Include detailed IP blacklist results
-      spamWords: spamWordAnalysis, // Include spam word analysis results
+      mxRecords: mxRecordsExist ? "Exists" : "Does not exist",
+      mxRecordsData,
+      domainBlacklistResults,
+      ipBlacklistResults,
+      spamWords: spamWordAnalysis,
     };
   } catch (error) {
     console.error(`❌ Error analyzing email for ${email}:`, error.message);
@@ -866,11 +781,9 @@ const analyzeEmail = async (email, testCode) => {
   }
 };
 
-// Helper function to extract SPF, DKIM, and DMARC results from headers
 const extractAuthResult = (header, type) => {
   const authHeader = header["authentication-results"] || [];
   const authResults = Array.isArray(authHeader) ? authHeader.join(" ") : authHeader;
-
   const match = authResults.match(new RegExp(`${type}=([a-zA-Z]+)`, "i"));
   return match ? match[1] : "Unknown";
 };
